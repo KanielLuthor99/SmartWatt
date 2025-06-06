@@ -1,0 +1,943 @@
+#include <PZEM004Tv30.h>
+#include <SPI.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <EEPROM.h>
+
+// Define pins for PZEM
+#define PZEM_RX_PIN 16
+#define PZEM_TX_PIN 17
+
+// Relay pin for power control
+#define RELAY_PIN 13 // Wemos pin IO 13 for relay
+
+// EEPROM addresses
+#define EEPROM_SIZE 128
+#define BALANCE_ADDR 0
+#define ENERGY_ADDR 4 // Used for storing last cumulative energy reading from PZEM
+#define TOTAL_CONSUMED_ENERGY_ADDR 8 // Address for storing total energy consumed
+#define TOTAL_USAGE_TIME_ADDR 12 // Address for storing total usage time in seconds
+
+// Default values for thresholds (used if EEPROM is empty or corrupted)
+#define DEFAULT_BALANCE 0.0
+#define DEFAULT_ENERGY 0.0 // Default for last cumulative energy
+#define DEFAULT_TOTAL_CONSUMED_ENERGY 0.0
+#define DEFAULT_TOTAL_USAGE_TIME 0
+
+// --- KONFIGURASI BIAYA ENERGI ---
+// SESUAIKAN NILAI INI DENGAN TARIF LISTRIK ANDA
+// SAAT INI: 0.001 kWh = Rp 100 => 1 kWh = Rp 100.000
+#define COST_PER_KWH 100000.0 // Rp. 100.000 per kWh
+// --- AKHIR KONFIGURASI BIAYA ENERGI ---
+
+// WiFi credentials
+const char* ssid = "Alek Zizan";          // WiFi SSID
+const char* password = "AlekZizan123"; // WiFi Password
+
+// Server object
+WebServer server(80);
+
+// Relay state
+bool relayState = true; // Initialize relay state to true (assuming light is ON initially)
+float balance = 0.0; // Current balance
+PZEM004Tv30 pzem(&Serial2); // Initialize with Serial2 for PZEM communication
+
+// Structure for PZEM readings
+struct PzemData {
+    float voltage;
+    float current;
+    float power;
+    float energy;
+    bool isValid;
+};
+
+PzemData readings = {0, 0, 0, 0, false};
+
+// Variabel untuk melacak pembacaan energi kumulatif terakhir dari PZEM
+// Digunakan untuk menghitung energi yang dikonsumsi sejak pembacaan terakhir
+float lastCumulativeEnergy = 0.0; 
+
+// Variabel baru untuk total pemakaian dan waktu
+float totalEnergyConsumed = 0.0; // Total energi yang telah dikonsumsi (kWh)
+unsigned long totalUsageTimeSeconds = 0; // Total waktu pemakaian (detik)
+
+// WiFi reconnection variables (not used in current loop, but good to keep)
+unsigned long lastWifiCheckTime = 0;
+const unsigned long WIFI_RECHECK_INTERVAL = 30000; // Check WiFi every 30 seconds
+
+// Last read time declaration
+unsigned long lastReadTime = 0; // Declare lastReadTime to track the time between readings
+
+// --- FORWARD DECLARATIONS ---
+// Declare functions before setup() so they are known to the compiler
+void handleRoot();
+void handleRecharge();
+void handleData();
+void handleSetRelay();
+void handleResetStats(); // New forward declaration for reset function
+void readPzemData();
+void saveBalance();
+void loadBalance();
+void resetEEPROMToDefaults();
+// --- END FORWARD DECLARATIONS ---
+
+
+// Setup function
+void setup() {
+  Serial.begin(9600); 
+  // Initialize EEPROM with the defined size
+  EEPROM.begin(EEPROM_SIZE);
+
+  pinMode(RELAY_PIN, OUTPUT);
+  
+  // Load previous balance, last cumulative energy, total consumed energy, and total usage time from EEPROM first
+  loadBalance(); 
+
+  // Set initial relay state based on balance loaded from EEPROM
+  // Assuming an active-low relay: LOW turns it ON, HIGH turns it OFF
+  // If balance is 0 or negative, turn off the relay initially
+  if (balance <= 0.0) {
+    relayState = false;
+    digitalWrite(RELAY_PIN, HIGH); // Turn OFF for active-low relay
+  } else {
+    relayState = true;
+    digitalWrite(RELAY_PIN, LOW); // Turn ON for active-low relay
+  }
+
+  Serial2.begin(9600, SERIAL_8N1, PZEM_RX_PIN, PZEM_TX_PIN); // Initialize PZEM with Serial2
+
+  Serial.println("Connecting to WiFi...");
+  
+  // --- PENGHAPUSAN KONFIGURASI IP STATIS ---
+  // Menghapus baris WiFi.config() untuk menggunakan DHCP (IP dinamis)
+  // if (!WiFi.config(staticIP, gateway, subnet, primaryDNS, secondaryDNS)) {
+  //   Serial.println("Failed to configure static IP!");
+  // }
+  // --- AKHIR PENGHAPUSAN KONFIGURASI IP STATIS ---
+
+  // Connect to WiFi
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(1000);
+    Serial.print(".");
+  }
+
+  // Display the IP address
+  Serial.println("\nConnected to WiFi"); // Terhubung ke WiFi
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.localIP());
+
+  // Setup WebServer routes
+  server.on("/", HTTP_GET, handleRoot);
+  server.on("/recharge", HTTP_POST, handleRecharge);
+  server.on("/data", HTTP_GET, handleData);
+  server.on("/setRelay", HTTP_POST, handleSetRelay);
+  server.on("/resetStats", HTTP_POST, handleResetStats); // New route for reset button
+
+  // Start the server
+  server.begin();
+  Serial.println("HTTP server started"); // Server HTTP dimulai
+
+  Serial.print("Loaded Balance: "); // Saldo yang dimuat
+  Serial.println(balance, 2);
+  Serial.print("Loaded Last Cumulative Energy: "); // Energi Kumulatif Terakhir yang dimuat
+  Serial.println(lastCumulativeEnergy, 5); // 5 decimal places for kWh
+  Serial.print("Loaded Total Consumed Energy: "); // Total Energi yang Dikonsumsi yang dimuat
+  Serial.println(totalEnergyConsumed, 5); // 5 decimal places for kWh
+  Serial.print("Loaded Total Usage Time (seconds): "); // Total Waktu Pemakaian (detik) yang dimuat
+  Serial.println(totalUsageTimeSeconds);
+}
+
+// Loop function
+void loop() {
+  server.handleClient();  // Handle HTTP requests
+
+  // Read PZEM data periodically
+  unsigned long currentTime = millis();
+  if (currentTime - lastReadTime >= 2000) { // Every 2 seconds
+    readPzemData();
+    lastReadTime = currentTime; // Update lastReadTime
+  }
+}
+
+// Function to handle the root page (HTML interface)
+void handleRoot() {
+  String html = R"raw(
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta name="viewport" content="width=device-width, initial-scale=1">
+      <title>Energy Monitor</title>
+      <style>
+        body { 
+            font-family: 'Inter', sans-serif; 
+            margin: 0; /* Remove default body margin */
+            background-color: #f4f4f4; 
+            color: #333; 
+            display: flex;
+            justify-content: flex-start; /* Align to far left */
+            align-items: flex-start; /* Align to top */
+            min-height: 100vh; /* Full viewport height */
+            padding: 20px; /* Add padding around the whole layout */
+            box-sizing: border-box; /* Include padding in element's total width and height */
+        }
+        .main-layout {
+            display: flex;
+            gap: 20px; /* Space between columns */
+            flex-wrap: wrap; /* Allow columns to wrap on smaller screens */
+            width: 100%; /* Take full width of parent (body with padding) */
+            max-width: 1200px; /* Max width for the entire layout */
+        }
+        .left-column {
+            flex: 0 0 315px; /* Fixed width for left column, 10% smaller */
+            background-color: #fff;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            min-height: 500px; /* Ensure it has some height */
+        }
+        .graph-area { /* Container for graph */
+            flex: 1; /* Takes all available space in the middle */
+            background-color: #fff;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            min-width: 400px; /* Minimum width for graph */
+        }
+        .buttons-area { /* Container for buttons, symmetrical to left-column */
+            flex: 0 0 315px; /* Fixed width, same as left-column */
+            background-color: #fff;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end; /* Align buttons to the right */
+            min-width: 280px; /* Minimum width to prevent squishing buttons */
+        }
+        canvas {
+            width: 100%; /* Take full width of its parent */
+            height: 350px; /* Fixed height for the graph */
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            background-color: #000; /* Black background for graph */
+            margin-top: 10px;
+        }
+        h1 { color: #0056b3; text-align: center; margin-bottom: 20px; }
+        h2 { color: #0056b3; text-align: center; margin-top: 0; margin-bottom: 15px;}
+        p { font-size: 1.1em; margin: 10px 0; }
+        .data-item { 
+          background-color: #e9ecef; 
+          padding: 12px 15px; 
+          border-radius: 6px; 
+          margin-bottom: 10px; 
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+        }
+        .data-item strong { color: #0056b3; }
+        
+        /* Styles for forms within buttons-area */
+        .buttons-area form {
+            width: 100%; /* Forms take full width of buttons-area */
+            max-width: 280px; /* Limit the width of the forms for better appearance */
+            margin-bottom: 15px; /* Spacing between forms */
+            border-top: none; /* Remove inherited border-top */
+            padding-top: 0; /* Remove inherited padding-top */
+        }
+        .buttons-area form:first-child {
+            margin-top: 0; /* No top margin for the first form */
+        }
+        .buttons-area label {
+            text-align: left; /* Align labels to the left */
+            width: 100%;
+            display: block;
+            margin-bottom: 8px; /* Add margin to label */
+            font-weight: bold; /* Keep font weight */
+            color: #555; /* Keep color */
+        }
+        .buttons-area input[type="number"], 
+        .buttons-area input[type="submit"] {
+            width: 100%; /* Make inputs fill the form width */
+            padding: 12px;
+            border-radius: 6px;
+            border: 1px solid #ddd;
+            box-sizing: border-box;
+            margin-bottom: 0; /* Remove default margin-bottom from inputs inside forms */
+        }
+        input[type="submit"] {
+          background-color: #007bff;
+          color: white;
+          border: none;
+          cursor: pointer;
+          font-size: 1.1em;
+          font-weight: bold;
+          transition: background-color 0.3s ease, transform 0.1s ease;
+        }
+        input[type="submit"]:hover { background-color: #0056b3; transform: translateY(-1px); }
+        input[type="submit"]:active { transform: translateY(0); }
+        .button-red { background-color: #dc3545; }
+        .button-red:hover { background-color: #c82333; }
+        .button-green { background-color: #28a745; }
+        .button-green:hover { background-color: #218838; }
+
+        /* Responsive adjustments */
+        @media (max-width: 800px) {
+            .main-layout {
+                flex-direction: column; /* Stack columns vertically on small screens */
+                align-items: center;
+            }
+            .left-column, .graph-area, .buttons-area {
+                width: 100%;
+                min-width: unset; /* Remove min-width to allow full width */
+                flex: 1 1 auto; /* Allow them to grow and shrink */
+            }
+            .buttons-area {
+                align-items: center; /* Center buttons on small screens */
+            }
+            .buttons-area form {
+                max-width: 100%; /* Allow forms to take full width on small screens */
+            }
+        }
+      </style>
+      <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap" rel="stylesheet">
+    </head>
+    <body>
+      <div class="main-layout">
+        <div class="left-column">
+          <h1>Energy Monitor</h1>
+          <div class="data-item">
+            <p><strong>Saldo:</strong></p><p id="balanceValue">Rp. )raw" + String(balance, 2) + R"raw(</p>
+          </div>
+          <div class="data-item">
+            <p><strong>Tegangan:</strong></p><p id="voltageValue"> )raw" + String(readings.voltage, 2) + R"raw( V</p>
+          </div>
+          <div class="data-item">
+            <p><strong>Arus:</strong></p><p id="currentValue"> )raw" + String(readings.current, 3) + R"raw( A</p>
+          </div>
+          <div class="data-item">
+            <p><strong>Daya:</strong></p><p id="powerValue"> )raw" + String(readings.power, 2) + R"raw( W</p>
+          </div>
+          <div class="data-item">
+            <p><strong>Energi Kumulatif:</strong></p><p id="energyValue"> )raw" + String(readings.energy, 5) + R"raw( kWh</p>
+          </div>
+          <div class="data-item">
+            <p><strong>Total Pemakaian:</strong></p><p id="totalEnergyConsumedValue"> )raw" + String(totalEnergyConsumed, 5) + R"raw( kWh</p>
+          </div>
+          <div class="data-item">
+            <p><strong>Waktu Pemakaian:</strong></p><p id="totalUsageTimeValue"> </p>
+          </div>
+        </div>
+
+        <div class="graph-area">
+            <h2>Grafik Daya (60 Detik Terakhir)</h2>
+            <canvas id="powerChart"></canvas>
+        </div>
+
+        <div class="buttons-area">
+            <form action="/recharge" method="POST">
+                <label for="amount">Jumlah Isi Ulang:</label>
+                <input type="number" id="amount" name="amount" placeholder="Masukkan jumlah" required min="0.01" step="0.01"><br>
+                <input type="submit" value="Isi Ulang">
+            </form>
+
+            <form action="/setRelay" method="POST">
+                <input type="hidden" name="state" id="relayStateInput" value=")raw" + String(relayState ? "0" : "1") + R"raw(" />
+                <input type="submit" id="relayButton" class=")raw" + String(relayState ? "button-green" : "button-red") + R"raw(" value="Turn )raw" + String(relayState ? "OFF" : "ON") + R"raw( Relay" />
+            </form>
+
+            <form action="/resetStats" method="POST" onsubmit="return confirm('Apakah Anda yakin ingin mereset semua statistik? Ini akan menghapus saldo, energi, dan waktu pemakaian.');">
+                <input type="submit" value="Reset Semua Statistik" class="button-red">
+            </form>
+        </div>
+      </div>
+
+      <script>
+        let clientSideUsageTime = 0; // This will hold the current usage time for client-side updates
+        let usageTimeInterval; // To store the interval ID for usage time updates
+
+        // Global array to store power data points for the graph
+        let powerDataPoints = [];
+        const GRAPH_TIME_WINDOW_MS = 60000; // 60 seconds for the graph (60 seconds * 1000 ms/s)
+        let hoverPoint = null; // Stores the data point currently being hovered over
+
+        // Function to format seconds into HH:MM:SS
+        function formatTime(seconds) {
+          const hours = Math.floor(seconds / 3600);
+          const minutes = Math.floor((seconds % 3600) / 60);
+          const remainingSeconds = seconds % 60;
+
+          const pad = (num) => String(num).padStart(2, '0');
+          return ${pad(hours)}:${pad(minutes)}:${pad(remainingSeconds)};
+        }
+
+        // Function to draw the real-time power graph
+        function drawGraph() {
+            const canvas = document.getElementById('powerChart');
+            if (!canvas) return;
+            const ctx = canvas.getContext('2d');
+
+            // Set canvas dimensions to match CSS for proper scaling
+            canvas.width = canvas.offsetWidth;
+            canvas.height = canvas.offsetHeight;
+
+            // Clear canvas and set black background
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.fillStyle = '#000'; // Black background
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+
+            // Filter data to only include points within the last GRAPH_TIME_WINDOW_MS
+            const now = Date.now();
+            powerDataPoints = powerDataPoints.filter(point => (now - point.timestamp) <= GRAPH_TIME_WINDOW_MS);
+
+            if (powerDataPoints.length < 1) {
+                ctx.fillStyle = '#AAA'; // Light gray text for black background
+                ctx.font = '14px Inter';
+                ctx.textAlign = 'center';
+                ctx.fillText('Menunggu data daya...', canvas.width / 2, canvas.height / 2);
+                return;
+            }
+
+            // Find max power for scaling
+            let maxPower = 0;
+            for (const point of powerDataPoints) {
+                if (point.power > maxPower) {
+                    maxPower = point.power;
+                }
+            }
+            maxPower = maxPower * 1.1; // Add a small buffer
+            if (maxPower === 0) maxPower = 1; // Avoid division by zero
+
+            // Graph padding
+            const padding = 35; // Increased padding for labels
+            const graphWidth = canvas.width - 2 * padding;
+            const graphHeight = canvas.height - 2 * padding;
+
+            // Draw axes
+            ctx.beginPath();
+            ctx.strokeStyle = '#666'; // Axis color for black background
+            ctx.lineWidth = 1;
+            // Y-axis
+            ctx.moveTo(padding, padding);
+            ctx.lineTo(padding, canvas.height - padding);
+            // X-axis
+            ctx.moveTo(padding, canvas.height - padding);
+            ctx.lineTo(canvas.width - padding, canvas.height - padding);
+            ctx.stroke();
+
+            // Draw Y-axis labels (Power)
+            ctx.fillStyle = '#EEE'; // Light text for black background
+            ctx.font = '10px Inter';
+            ctx.textAlign = 'right';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(maxPower.toFixed(1) + ' W', padding - 5, padding);
+            ctx.fillText('0 W', padding - 5, canvas.height - padding);
+
+            // Draw X-axis labels (Time - relative)
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'top';
+            // Calculate time labels for the X-axis
+            const timeLabels = [
+                -${(GRAPH_TIME_WINDOW_MS / 1000)}s, // Start of window (e.g., -60s)
+                -${(GRAPH_TIME_WINDOW_MS / 2 / 1000)}s, // Middle of window (e.g., -30s)
+                0s // Current time
+            ];
+            ctx.fillText(timeLabels[0], padding, canvas.height - padding + 5);
+            ctx.fillText(timeLabels[1], padding + graphWidth / 2, canvas.height - padding + 5);
+            ctx.fillText(timeLabels[2], canvas.width - padding, canvas.height - padding + 5);
+
+
+            // Draw data points (Step Graph)
+            ctx.beginPath();
+            ctx.lineWidth = 2;
+
+            for (let i = 0; i < powerDataPoints.length; i++) {
+                const point = powerDataPoints[i];
+                const x = padding + graphWidth * (1 - (now - point.timestamp) / GRAPH_TIME_WINDOW_MS);
+                const y = canvas.height - padding - (point.power / maxPower) * graphHeight;
+
+                if (i === 0) {
+                    ctx.moveTo(x, y);
+                } else {
+                    const prevPoint = powerDataPoints[i - 1];
+                    const prevX = padding + graphWidth * (1 - (now - prevPoint.timestamp) / GRAPH_TIME_WINDOW_MS);
+                    const prevY = canvas.height - padding - (prevPoint.power / maxPower) * graphHeight;
+
+                    // Determine color based on spike direction
+                    if (point.power > prevPoint.power) {
+                        ctx.strokeStyle = '#0F0'; // Green for upward spike
+                    } else if (point.power < prevPoint.power) {
+                        ctx.strokeStyle = '#F00'; // Red for downward spike
+                    } else {
+                        ctx.strokeStyle = '#888'; // Grey for flat line
+                    }
+
+                    // Draw horizontal segment from previous point's X to current point's X at previous point's Y
+                    ctx.lineTo(x, prevY);
+                    ctx.stroke(); // Stroke the segment before changing color if needed
+
+                    // Draw vertical segment from current point's X at previous point's Y to current point's Y
+                    ctx.beginPath(); // Start new path for vertical segment
+                    ctx.strokeStyle = ctx.strokeStyle; // Keep the same color for vertical segment
+                    ctx.moveTo(x, prevY);
+                    ctx.lineTo(x, y);
+                    ctx.stroke(); // Stroke the vertical segment
+                }
+            }
+            // Ensure the last segment is drawn if loop finishes
+            if (powerDataPoints.length > 0) {
+                const lastPoint = powerDataPoints[powerDataPoints.length - 1];
+                const lastX = padding + graphWidth * (1 - (now - lastPoint.timestamp) / GRAPH_TIME_WINDOW_MS);
+                const lastY = canvas.height - padding - (lastPoint.power / maxPower) * graphHeight;
+                ctx.lineTo(lastX, lastY); // Ensure the last point is reached
+                ctx.stroke();
+            }
+
+
+            // Draw hover point indicator and tooltip
+            if (hoverPoint) {
+                const hoverX = padding + graphWidth * (1 - (now - hoverPoint.timestamp) / GRAPH_TIME_WINDOW_MS);
+                const hoverY = canvas.height - padding - (hoverPoint.power / maxPower) * graphHeight;
+
+                // Draw circle at hover point
+                ctx.beginPath();
+                ctx.arc(hoverX, hoverY, 5, 0, Math.PI * 2);
+                ctx.fillStyle = '#FFF'; // White circle
+                ctx.fill();
+                ctx.strokeStyle = '#007bff';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+
+                // Draw tooltip
+                const tooltipText = Time: ${new Date(hoverPoint.timestamp).toLocaleTimeString()}\nPower: ${hoverPoint.power.toFixed(2)} W;
+                const lines = tooltipText.split('\n');
+                const lineHeight = 16;
+                const textWidth = Math.max(ctx.measureText(lines[0]).width, ctx.measureText(lines[1]).width);
+                const tooltipPadding = 5;
+                const tooltipHeight = lines.length * lineHeight + 2 * tooltipPadding;
+                const tooltipWidth = textWidth + 2 * tooltipPadding;
+
+                let tooltipX = hoverX + 10;
+                let tooltipY = hoverY - tooltipHeight / 2;
+
+                // Adjust tooltip position if it goes off canvas
+                if (tooltipX + tooltipWidth > canvas.width) {
+                    tooltipX = hoverX - tooltipWidth - 10;
+                }
+                if (tooltipY < 0) {
+                    tooltipY = 0;
+                }
+                if (tooltipY + tooltipHeight > canvas.height) {
+                    tooltipY = canvas.height - tooltipHeight;
+                }
+
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.8)'; // Semi-transparent black background
+                ctx.fillRect(tooltipX, tooltipY, tooltipWidth, tooltipHeight);
+                ctx.strokeStyle = '#FFF';
+                ctx.lineWidth = 1;
+                ctx.strokeRect(tooltipX, tooltipY, tooltipWidth, tooltipHeight);
+
+                ctx.fillStyle = '#FFF'; // White text
+                ctx.font = '12px Inter';
+                ctx.textAlign = 'left';
+                ctx.textBaseline = 'top';
+                lines.forEach((line, index) => {
+                    ctx.fillText(line, tooltipX + tooltipPadding, tooltipY + tooltipPadding + index * lineHeight);
+                });
+            }
+        }
+
+
+        // Function to fetch data from the ESP32 and update the HTML
+        function fetchData() {
+          fetch('/data')
+            .then(response => response.json())
+            .then(data => {
+              // Update balance (always shows current balance)
+              document.getElementById('balanceValue').innerText = 'Rp. ' + data.balance.toFixed(2); 
+
+              // Check if PZEM readings are valid
+              if (data.isValid) {
+                document.getElementById('voltageValue').innerText = data.voltage.toFixed(2) + ' V';
+                document.getElementById('currentValue').innerText = data.current.toFixed(3) + ' A';
+                document.getElementById('powerValue').innerText = data.power.toFixed(2) + ' ' + 'W'; // Added 'W' unit
+                document.getElementById('energyValue').innerText = data.energy.toFixed(5) + ' kWh'; // 5 decimal places
+                document.getElementById('totalEnergyConsumedValue').innerText = data.totalEnergyConsumed.toFixed(5) + ' kWh'; // 5 decimal places
+                
+                // Update client-side usage time base from server
+                clientSideUsageTime = data.totalUsageTimeSeconds;
+                document.getElementById('totalUsageTimeValue').innerText = formatTime(clientSideUsageTime);
+
+                // Add new power data point for graph
+                powerDataPoints.push({ timestamp: Date.now(), power: data.power });
+                drawGraph(); // Redraw graph with new data
+
+                // Ensure usage time interval is running if power is being drawn
+                if (data.power > 0.1 && !usageTimeInterval) {
+                    usageTimeInterval = setInterval(updateClientSideUsageTime, 1000);
+                } else if (data.power <= 0.1 && usageTimeInterval) {
+                    clearInterval(usageTimeInterval);
+                    usageTimeInterval = null;
+                }
+
+              } else {
+                // If readings are not valid, set measurement displays to 0
+                document.getElementById('voltageValue').innerText = '0.00 V';
+                document.getElementById('currentValue').innerText = '0.000 A';
+                document.getElementById('powerValue').innerText = '0.00 W';
+                document.getElementById('energyValue').innerText = '0.00000 kWh';
+                document.getElementById('totalEnergyConsumedValue').innerText = '0.00000 kWh';
+                document.getElementById('totalUsageTimeValue').innerText = '00:00:00';
+                clientSideUsageTime = 0; // Reset client-side counter
+                if (usageTimeInterval) { // Stop client-side interval if not valid
+                    clearInterval(usageTimeInterval);
+                    usageTimeInterval = null;
+                }
+                powerDataPoints = []; // Clear graph data if readings are invalid
+                drawGraph(); // Redraw to show "No data" message
+              }
+
+              // Update relay button text and class based on current state
+              const relayButton = document.getElementById('relayButton');
+              const relayStateInput = document.getElementById('relayStateInput');
+              if (data.relayState) { // If relay is ON (true)
+                relayButton.value = 'Matikan Relay';
+                relayButton.classList.remove('button-green'); 
+                relayButton.classList.add('button-red'); 
+                relayStateInput.value = '0'; // Next click will turn OFF
+              } else { // If relay is OFF (false)
+                relayButton.value = 'Nyalakan Relay';
+                relayButton.classList.remove('button-red'); 
+                relayButton.classList.add('button-green'); 
+                relayStateInput.value = '1'; // Next click will turn ON
+              }
+            })
+            .catch(error => console.error('Error fetching data:', error));
+        }
+
+        // Function to update usage time every second on the client-side
+        function updateClientSideUsageTime() {
+            // This function is now only called if power is being drawn (handled by fetchData)
+            clientSideUsageTime++;
+            document.getElementById('totalUsageTimeValue').innerText = formatTime(clientSideUsageTime);
+        }
+
+
+        // Fetch data initially when the page loads
+        document.addEventListener('DOMContentLoaded', () => {
+            fetchData(); // Initial fetch
+            // The usageTimeInterval will be started/stopped by fetchData based on power status
+            
+            // Setup mouse events for graph
+            const canvas = document.getElementById('powerChart');
+            if (canvas) {
+                canvas.addEventListener('mousemove', (e) => {
+                    const rect = canvas.getBoundingClientRect();
+                    const mouseX = e.clientX - rect.left;
+                    const mouseY = e.clientY - rect.top;
+
+                    // Graph padding
+                    const padding = 35;
+                    const graphWidth = canvas.width - 2 * padding;
+                    
+                    // Check if mouse is within graph area
+                    if (mouseX >= padding && mouseX <= canvas.width - padding &&
+                        mouseY >= padding && mouseY <= canvas.height - padding &&
+                        powerDataPoints.length > 0) {
+                        
+                        const now = Date.now();
+                        // Map mouseX to a timestamp
+                        const relativeX = (mouseX - padding) / graphWidth; // 0 to 1
+                        const targetTimestamp = now - (1 - relativeX) * GRAPH_TIME_WINDOW_MS;
+
+                        // Find the closest data point
+                        let closestPoint = null;
+                        let minDiff = Infinity;
+
+                        for (const point of powerDataPoints) {
+                            const diff = Math.abs(point.timestamp - targetTimestamp);
+                            if (diff < minDiff) {
+                                minDiff = diff;
+                                closestPoint = point;
+                            }
+                            // Optimization: if points are sorted by timestamp, we can break early
+                            // For step graph, closest point might be slightly to the right of cursor
+                            if (point.timestamp > targetTimestamp && closestPoint) {
+                                break; 
+                            }
+                        }
+                        hoverPoint = closestPoint;
+                        drawGraph(); // Redraw with hover point
+                    } else {
+                        if (hoverPoint) {
+                            hoverPoint = null;
+                            drawGraph(); // Redraw to clear hover point
+                        }
+                    }
+                });
+
+                canvas.addEventListener('mouseout', () => {
+                    if (hoverPoint) {
+                        hoverPoint = null;
+                        drawGraph(); // Redraw to clear hover point
+                    }
+                });
+            }
+        });
+
+        // Fetch data every 2 seconds (2000 milliseconds) from ESP32 to resync
+        setInterval(fetchData, 2000);
+      </script>
+    </body>
+    </html>
+  )raw";
+  server.send(200, "text/html", html);
+}
+
+// Function to handle recharge requests (POST)
+void handleRecharge() {
+  if (server.hasArg("amount")) {
+    String rechargeAmountStr = server.arg("amount");
+    float rechargeAmount = rechargeAmountStr.toFloat();
+    if (rechargeAmount > 0) {
+      balance += rechargeAmount;
+      saveBalance();  // Save the updated balance and other EEPROM data
+      // Redirect back to the root page after recharge
+      server.sendHeader("Location", "/");
+      server.send(303); // Use 303 See Other for POST redirect
+    } else {
+      server.send(400, "text/plain", "Invalid recharge amount. Please enter a positive number.");
+    }
+  } else {
+    server.send(400, "text/plain", "Recharge amount not provided.");
+  }
+}
+
+// Function to handle data requests (GET)
+void handleData() {
+  String jsonData = "{\"balance\": " + String(balance, 2) + 
+                    ", \"voltage\": " + String(readings.voltage, 2) + 
+                    ", \"current\": " + String(readings.current, 3) + 
+                    ", \"power\": " + String(readings.power, 2) + 
+                    ", \"energy\": " + String(readings.energy, 5) +  // 5 decimal places
+                    ", \"totalEnergyConsumed\": " + String(totalEnergyConsumed, 5) + // 5 decimal places
+                    ", \"totalUsageTimeSeconds\": " + String(totalUsageTimeSeconds) +
+                    ", \"relayState\": " + String(relayState ? "true" : "false") + 
+                    ", \"isValid\": " + String(readings.isValid ? "true" : "false") + // Include isValid flag
+                    "}";
+  server.send(200, "application/json", jsonData);
+}
+
+// Function to handle relay state changes (POST)
+void handleSetRelay() {
+  if (server.hasArg("state")) {
+    String state = server.arg("state");
+    bool requestedState = (state == "1"); // True for ON, False for OFF
+
+    // Only allow turning ON if balance is positive
+    if (requestedState == true && balance <= 0.0) {
+      server.send(403, "text/plain", "Tidak dapat menyalakan relay. Saldo tidak mencukupi.");
+      return; // Stop execution if balance is insufficient
+    }
+
+    relayState = requestedState; // Update relayState based on request
+    
+    // IMPORTANT: This line assumes an ACTIVE-LOW relay.
+    // If your relay is active-low, HIGH turns it OFF, LOW turns it ON.
+    // So, if relayState is true (want ON), set LOW. If false (want OFF), set HIGH.
+    digitalWrite(RELAY_PIN, relayState ? LOW : HIGH); 
+    
+    // If your relay is ACTIVE-HIGH, use the line below instead:
+    // digitalWrite(RELAY_PIN, relayState ? HIGH : LOW); 
+
+    // Redirect back to the root page after setting the relay state
+    server.sendHeader("Location", "/");
+    server.send(303); // Use 303 See Other for POST redirect
+  } else {
+    server.send(400, "text/plain", "Relay state not provided.");
+  }
+}
+
+// NEW Function to handle reset all stats
+void handleResetStats() {
+  Serial.println("Resetting all stats...");
+  // Reset global variables to default values
+  balance = DEFAULT_BALANCE;
+  lastCumulativeEnergy = DEFAULT_ENERGY;
+  totalEnergyConsumed = DEFAULT_TOTAL_CONSUMED_ENERGY;
+  totalUsageTimeSeconds = DEFAULT_TOTAL_USAGE_TIME;
+
+  // Save these default values to EEPROM
+  saveBalance(); 
+
+  // Ensure relay is off after reset as balance is zero
+  relayState = false;
+  digitalWrite(RELAY_PIN, HIGH); // Assuming active-low relay: HIGH turns it OFF
+
+  // Redirect back to the root page
+  server.sendHeader("Location", "/");
+  server.send(303); 
+}
+
+// Function to read PZEM data
+void readPzemData() {
+  float tempVoltage = pzem.voltage();
+  float tempCurrent = pzem.current();
+  float tempPower = pzem.power();
+  float tempEnergy = pzem.energy(); // Get the current cumulative energy
+
+  // --- DIAGNOSTIK ARUS ---
+  Serial.print("DEBUG: Nilai mentah pzem.current(): ");
+  Serial.println(tempCurrent, 3);
+  if (isnan(tempCurrent)) {
+    Serial.println("DIAGNOSTIK: Arus adalah NaN, periksa koneksi PZEM dan daya!");
+  }
+  // --- AKHIR DIAGNOSTIK ARUS ---
+
+  // Determine validity based on raw readings
+  bool currentReadingsAreValid = !isnan(tempVoltage) && !isnan(tempCurrent) && !isnan(tempPower) && !isnan(tempEnergy) &&
+                                 tempVoltage >= 0 && tempCurrent >= 0 && tempPower >= 0 && tempEnergy >= 0;
+
+  if (currentReadingsAreValid) {
+    readings.voltage = tempVoltage;
+    readings.current = tempCurrent;
+    readings.power = tempPower;
+    readings.energy = tempEnergy;
+    readings.isValid = true;
+  } else {
+    // If readings are not valid, set all current measurements to 0 for display
+    readings.voltage = 0.0;
+    readings.current = 0.0;
+    readings.power = 0.0;
+    readings.energy = 0.0; // Also set energy to 0 for display consistency when invalid
+    readings.isValid = false;
+    Serial.println("PZEM readings are invalid. Displaying zeros for current measurements.");
+  }
+
+
+  Serial.print("Tegangan: ");
+  Serial.print(readings.voltage, 2);
+  Serial.print(" V, Arus: ");
+  Serial.print(readings.current, 3); // 3 decimal places
+  Serial.print(" A, Daya: ");
+  Serial.print(readings.power, 2);
+  Serial.print(" W, Energi Kumulatif: ");
+  Serial.print(readings.energy, 5); // 5 decimal places
+  Serial.println(" kWh");
+
+  // Only proceed with balance deduction and usage time accumulation if readings are valid
+  if (readings.isValid) { 
+    float energyConsumed = readings.energy - lastCumulativeEnergy; // Use readings.energy (which is valid)
+
+    // Only deduct if actual consumption occurred (and not a reset or negative reading)
+    // Use a small threshold to avoid floating point errors or very tiny fluctuations
+    if (energyConsumed > 0.000001) { // Adjusted threshold for higher precision
+      float cost = energyConsumed * COST_PER_KWH;
+      balance -= cost;
+      totalEnergyConsumed += energyConsumed; // Accumulate total consumed energy
+
+      Serial.print("Energi dikonsumsi: ");
+      Serial.print(energyConsumed, 5); // 5 decimal places
+      Serial.print(" kWh, Biaya: ");
+      Serial.print(cost, 2);
+      Serial.print(" Rp. Saldo Baru: ");
+      Serial.println(balance, 2);
+      
+      saveBalance(); // Save updated balance and other EEPROM data
+    }
+    
+    // Update lastCumulativeEnergy for the next cycle, only if current reading is valid.
+    // This prevents lastCumulativeEnergy from holding a stale valid value if PZEM goes invalid.
+    lastCumulativeEnergy = readings.energy; 
+
+    // Accumulate usage time if power is being drawn
+    // Use a small power threshold to consider it "in use"
+    if (readings.power > 0.1) { 
+      totalUsageTimeSeconds += (2000 / 1000); // Add 2 seconds (interval is 2000ms)
+    }
+  } else {
+    // If readings are not valid, reset lastCumulativeEnergy to 0.0 to prevent large jumps
+    // when it becomes valid again. This is crucial for correct energy calculation.
+    lastCumulativeEnergy = 0.0; 
+    // Do not deduct balance or accumulate usage time if readings are invalid
+    Serial.println("PZEM readings are invalid. Skipping balance deduction and usage time accumulation.");
+  }
+
+
+  // Implement logic to turn off relay if balance drops below a threshold
+  if (balance <= 0.0 && relayState == true) {
+    relayState = false;
+    // Assuming active-low relay: HIGH turns it OFF
+    digitalWrite(RELAY_PIN, HIGH); 
+    Serial.println("Saldo nol atau negatif, mematikan relay!");
+  }
+  // Removed the else if (balance > 0.0 && relayState == false) block
+  // This ensures that if the user manually turns off the relay, it stays off
+  // The relay will only turn ON if manually set ON via website AND balance is positive.
+  // The handleSetRelay function already handles checking balance before allowing manual ON.
+}
+
+// Function to save balance and other data to EEPROM
+void saveBalance() {
+  EEPROM.put(BALANCE_ADDR, balance);
+  EEPROM.put(ENERGY_ADDR, lastCumulativeEnergy); // Save last cumulative energy from PZEM
+  EEPROM.put(TOTAL_CONSUMED_ENERGY_ADDR, totalEnergyConsumed); // Save total consumed energy
+  EEPROM.put(TOTAL_USAGE_TIME_ADDR, totalUsageTimeSeconds); // Save total usage time
+  EEPROM.commit();  // Commit changes to EEPROM
+  Serial.println("Saldo, Energi Kumulatif Terakhir, Total Pemakaian Energi, dan Waktu Pemakaian disimpan ke EEPROM.");
+}
+
+// Function to load balance and other data from EEPROM
+void loadBalance() {
+  EEPROM.get(BALANCE_ADDR, balance);
+  EEPROM.get(ENERGY_ADDR, lastCumulativeEnergy); // Load last cumulative energy from PZEM
+  EEPROM.get(TOTAL_CONSUMED_ENERGY_ADDR, totalEnergyConsumed); // Load total consumed energy
+  EEPROM.get(TOTAL_USAGE_TIME_ADDR, totalUsageTimeSeconds); // Load total usage time
+
+  // Validate loaded balance
+  if (isnan(balance) || balance < 0 || balance > 1000000000) { 
+    balance = DEFAULT_BALANCE;
+    Serial.println("Saldo EEPROM tidak valid atau di luar jangkauan, mereset ke default.");
+    EEPROM.put(BALANCE_ADDR, balance); 
+    EEPROM.commit();
+  }
+
+  // Validate loaded lastCumulativeEnergy
+  if (isnan(lastCumulativeEnergy) || lastCumulativeEnergy < 0) {
+    lastCumulativeEnergy = 0.0;
+    Serial.println("lastCumulativeEnergy EEPROM tidak valid, mereset ke default.");
+    EEPROM.put(ENERGY_ADDR, lastCumulativeEnergy); 
+    EEPROM.commit();
+  }
+
+  // Validate loaded totalEnergyConsumed
+  if (isnan(totalEnergyConsumed) || totalEnergyConsumed < 0) {
+    totalEnergyConsumed = DEFAULT_TOTAL_CONSUMED_ENERGY;
+    Serial.println("totalEnergyConsumed EEPROM tidak valid, mereset ke default.");
+    EEPROM.put(TOTAL_CONSUMED_ENERGY_ADDR, totalEnergyConsumed);
+    EEPROM.commit();
+  }
+
+  // Validate loaded totalUsageTimeSeconds
+  if (totalUsageTimeSeconds < 0) { // unsigned long cannot be < 0, but for safety
+    totalUsageTimeSeconds = DEFAULT_TOTAL_USAGE_TIME;
+    Serial.println("totalUsageTimeSeconds EEPROM tidak valid, mereset ke default.");
+    EEPROM.put(TOTAL_USAGE_TIME_ADDR, totalUsageTimeSeconds);
+    EEPROM.commit();
+  }
+}
+
+// Function to reset EEPROM to defaults (can be called via a separate route or button)
+void resetEEPROMToDefaults() {
+  EEPROM.put(BALANCE_ADDR, DEFAULT_BALANCE);
+  EEPROM.put(ENERGY_ADDR, DEFAULT_ENERGY); 
+  EEPROM.put(TOTAL_CONSUMED_ENERGY_ADDR, DEFAULT_TOTAL_CONSUMED_ENERGY);
+  EEPROM.put(TOTAL_USAGE_TIME_ADDR, DEFAULT_TOTAL_USAGE_TIME);
+  EEPROM.commit();
+  Serial.println("EEPROM direset ke default.");
+}
