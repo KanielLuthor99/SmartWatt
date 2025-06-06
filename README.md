@@ -1,42 +1,83 @@
-![image](https://github.com/user-attachments/assets/2909bda9-1c2f-43a0-b32d-8572ce16fd22)
+## Smart Electricity Usage Monitoring and Billing System Using ESP32 and Current Sensors
+![image](https://github.com/user-attachments/assets/a09a36d0-debb-4988-a16d-84035de01dc4)
+
+
+
+
+## Our Team
+- Abdul Haris Muhasibi          
+- Barru Wira Yasa               
+- Farrel Firmanditto Azka      
+- Muhammad Shean Elliora Ribah  
+- Muhammad Syauqi Muttaqin      
+- Ruasa Azizan Zihni            
 
 
 
 
 
+### Project Domain
+The project focuses on real-time energy monitoring and prepaid billing using an ESP32 microcontroller integrated with a PZEM-004T sensor to measure electrical parameters and manage power consumption efficiently.
 
-Untuk mengatasi kesulitan mengontrol tagihan dan kurangnya kesadaran konsumsi energi real-time, sistem
- monitor energi prabayar ini dirancang dengan Mikrokontroler ESP32 sebagai pusatnya. Sistem bekerja dengan
- Sensor PZEM-004T V3 yang mengukur pemakaian listrik pada Beban Listrik, lalu ESP32 memproses data
- tersebut untuk mengurangi saldo prabayar pengguna. Jika saldo habis, ESP32 menginstruksikan Modul Relay
- untuk memutus aliran listrik. Pengguna dapat memantau dan mengontrol seluruh sistem, termasuk melakukan
- isi ulang, melalui Antarmuka Web (HTML) yang diakses via WiFi, dengan data yang juga bisa ditampilkan pada
- Layar LCD/TFT lokal.
+### Problem Statements
+- Manual monitoring of electricity usage is inefficient and prone to errors.
+- Overconsumption of electricity can lead to unexpectedly high costs, especially in households or small businesses.
+- Lack of real-time insights into energy usage makes it difficult to manage budgets and optimize consumption.
 
- Sistem ini dirancang untuk memantau konsumsi daya listrik secara real-time menggunakan sensor arus
- (PZEM-004T V3) dan sensor tegangan. Data dari sensor dibaca dan diproses oleh mikrokontroler ESP32, yang
- menghitung konsumsi energi listrik (dalam kWh) dan mengonversinya menjadi estimasi biaya berdasarkan
- tarif listrik yang dapat diatur secara manual.
- Hasil pemantauan dapat ditampilkan melalui beberapa media, yaitu serial monitor, serta dikirim melalui
- koneksi WiFi untuk diakses secara jarak jauh, misalnya ke server lokal atau endpoint tertentu. Selain itu,
- sistem memungkinkan pengaturan batas konsumsi daya, sehingga dapat memberikan peringatan atau
- notifikasi apabila konsumsi melebihi batas yang telah ditentukan.
- Dengan fitur monitoring, perhitungan biaya, dan notifikasi, sistem ini dapat menjadi solusi praktis untuk
- membantu pengguna dalam mengelola penggunaan listrik secara efisien
-![image](https://github.com/user-attachments/assets/d0843ca8-f7f3-40f4-88d2-3ce4feb65677)
+### Goals
+- Automate the monitoring of electricity consumption in real-time.
+- Provide accurate cost estimation based on customizable electricity tariffs.
+- Enable prepaid billing and notifications to prevent overconsumption and promote efficient energy use.
 
-PRINSIP KERJA ALAT PRINSIP KERJA ALAT
- Untuk mengatasi permasalahan tersebut, sistem Monitor Energi Prabayar Berbasis ESP32 dengan Sensor PZEM-004T dan Antarmuka
- Web ini dirancang sebagai solusi yang komprehensif. Sistem ini memungkinkan pengguna untuk:
- 1.Melakukan Pembayaran di Muka (Prabayar)
- 2.Memantau Konsumsi Energi secara Real-Time
- 3.Melihat Riwayat dan Statistik Pemakaian
- 4.Mengelola Anggaran Listrik
- Komponen utama sistem meliputi:
- 1.ESP32: Sebagai mikrokontroler utama yang menjadi otak sistem, menjalankan server web, membaca sensor, mengontrol relay, dan
- mengelola logika prabayar.
- 2.Sensor PZEM-004T: Untuk mengukur parameter listrik secara akurat.
- 3.Modul Relay: Sebagai saklar elektronik untuk menghubungkan atau memutuskan aliran listrik ke beban.
- 4.Interface Web(HTML): Sebagai sarana interaksi utama pengguna dengan sistem.
- Dengan sistem ini, pengguna mendapatkan kendali penuh atas pemakaian dan biaya listrik mereka, mendorong penggunaan energi
- yang lebih bijak dan efisien
+### Solution Statements
+- Integrate a PZEM-004T sensor to measure current, voltage, and energy consumption (in kWh).
+- Use an ESP32 microcontroller to process sensor data, calculate costs, and manage prepaid billing logic.
+- Implement a web interface (HTML) for remote monitoring and user interaction.
+- Include a relay module to control power supply based on prepaid balance or consumption limits.
+- Provide notifications when energy consumption exceeds predefined thresholds.
+
+### Prerequisites
+#### Component Preparation
+- **ESP32**: Microcontroller for processing sensor data, running a web server, and controlling the system.
+- **PZEM-004T V3 Sensor**: Measures current, voltage, and energy consumption accurately.
+- **Relay Module (5V)**: Acts as an electronic switch to connect or disconnect the power supply to the load.
+- **Power Supply**: Suitable power source for the ESP32 and other components (e.g., 5V adapter).
+- **WiFi Connection**: Enables remote access to the system via a web interface.
+- **Web Interface (HTML)**: Provides a user-friendly platform for monitoring and managing energy usage.
+
+### Working Principle
+To address the identified problems, the **ESP32-based Prepaid Energy Monitoring System with PZEM-004T Sensor and Web Interface** is designed as a comprehensive solution. The system enables users to:
+1. **Facilitate Prepaid Billing**: Users can pay in advance, and the system deducts costs based on real-time consumption.
+2. **Monitor Energy Usage in Real-Time**: Displays current, voltage, energy (kWh), and estimated costs via a web interface or serial monitor.
+3. **Track Usage History and Statistics**: Logs consumption data for analysis and budgeting.
+4. **Manage Electricity Budget**: Sets consumption limits and sends alerts when thresholds are exceeded.
+5. **Control Power Supply**: Automatically disconnects the load via the relay if the prepaid balance is depleted or consumption limits are reached.
+
+#### Key Components and Their Roles:
+- **ESP32**: Acts as the system’s core, processing sensor data, running the web server, controlling the relay, and managing prepaid logic.
+- **PZEM-004T Sensor**: Accurately measures electrical parameters (current, voltage, power, and energy).
+- **Relay Module**: Controls the power supply to the load based on system logic.
+- **Web Interface (HTML)**: Provides an interactive platform for users to monitor consumption, view statistics, and manage prepaid settings.
+
+With this system, users gain full control over their electricity usage and costs, promoting wiser and more efficient energy consumption.
+
+## Block Diagram
+![image](https://github.com/user-attachments/assets/72cba199-2559-45e9-9862-7fd01549591e)
+
+## Sequence Diagram
+![image](https://github.com/user-attachments/assets/9b3fc6ed-a1ca-49dc-83d3-18b417de12da)
+
+
+## Flow Diagram
+![image](https://github.com/user-attachments/assets/c520558d-ec12-484e-8ad6-df6931557b45)
+
+## Preview
+
+![image](https://github.com/user-attachments/assets/5d84224d-069f-41fc-a725-a2d65529928d)
+![image](https://github.com/user-attachments/assets/e1192467-0cb9-4b39-bada-5ec14fa9c38a)
+
+## Data Sheets ESP32
+![image](https://github.com/user-attachments/assets/4c69d258-e923-4d43-8856-16eef52316f8)
+
+## Demo
+https://youtu.be/AsEIP3yxGpQ?si=U26-7BNE_a0y1kis
