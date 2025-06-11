@@ -3,19 +3,6 @@
 
 
 
-
-## Our Team
-- Abdul Haris Muhasibi          
-- Barru Wira Yasa               
-- Farrel Firmanditto Azka      
-- Muhammad Shean Elliora Ribah  
-- Muhammad Syauqi Muttaqin      
-- Ruasa Azizan Zihni            
-
-
-
-
-
 ### Project Domain
 The project focuses on real-time energy monitoring and prepaid billing using an ESP32 microcontroller integrated with a PZEM-004T sensor to measure electrical parameters and manage power consumption efficiently.
 
@@ -81,3 +68,12 @@ With this system, users gain full control over their electricity usage and costs
 
 ## Demo
 https://youtu.be/AsEIP3yxGpQ?si=U26-7BNE_a0y1kis
+
+
+## Our Team
+- Abdul Haris Muhasibi               (235150307111047)
+- Barru Wira Yasa                    (235150301111021)
+- Farrel Firmanditto Azka            (235150307111040)
+- Muhammad Shean Elliora Ribah       (235150307111046)
+- Muhammad Syauqi Muttaqin           (235150307111036)
+- Ruasa Azizan Zihni                 (235150301111046)
